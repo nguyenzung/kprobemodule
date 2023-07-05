@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Here's a sample kernel module showing the use of kprobes to dump a
- * stack trace and selected registers when kernel_clone() is called.
+ * Here's a sample kernel module showing the use of kprobes count when kmalloc() is called.
  *
  * For more information on theory of operation of kprobes, see
  * Documentation/trace/kprobes.rst
  *
- * You will see the trace data in /var/log/messages and on the console
- * whenever kernel_clone() is invoked to create a new process.
+ * You will see the trace data in /dev/tracerdriver
  */
 
 #define pr_fmt(fmt) "%s: " fmt, __func__
