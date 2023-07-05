@@ -1,0 +1,19 @@
+Monitor how many time the function kmalloc() is call in process context
+
+1. Compile
+    make 
+
+2. Install
+    sudo insmod kprobemodule.ko
+
+3. Grant permission to the device file
+    sudo chmod 777 /dev/tracerdriver
+
+4. View info 
+    cat /dev/tracerdriver
+
+5. Start monitor a process:
+    echo s{PID} > /dev/tracerdriver
+
+6. Clear monitor a process:
+    cho e{PID} > /dev/tracerdriver
