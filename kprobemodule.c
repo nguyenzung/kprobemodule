@@ -12,6 +12,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/version.h>
 #include <linux/uaccess.h>
 #include <linux/fs.h>
 #include <linux/cdev.h>
@@ -19,7 +20,7 @@
 #include <linux/hashtable.h>
 #include <linux/mutex.h>
 #include <linux/errno.h>
-#include <linux/vmalloc.h>
+#include <linux/slab.h>
 
 
 /* Meta Information */
@@ -50,12 +51,13 @@ struct info {
 	struct hlist_node node;
 };
 
-static struct info* check_pid(int pid)
+static struct info *find_info_by_pid(int pid)
 {
 	struct info *pid_info;
 	hash_for_each_possible(pid_map, pid_info, node, pid) {
-        return pid_info;
-    }
+		if (pid_info->pid == pid)
+			return pid_info;
+	}
 	return NULL;
 }
 
@@ -63,9 +65,13 @@ static int add_to_trace_file(int pid)
 {
 	struct info *pid_info;
 	spin_lock(&pid_map_lock);
-	if (!check_pid(pid))
+	if (!find_info_by_pid(pid))
 	{
-		pid_info = vmalloc(sizeof(struct info));
+		pid_info = kmalloc(sizeof(struct info), GFP_ATOMIC);
+		if (!pid_info) {
+			spin_unlock(&pid_map_lock);
+			return -ENOMEM;
+		}
 		pid_info->pid = pid;
 		pid_info->kmalloc_count = 0;
 		INIT_HLIST_NODE(&pid_info->node);
@@ -82,7 +88,7 @@ static int delete_from_trace_list(int pid)
 {
 	struct info *pid_info;
 	spin_lock(&pid_map_lock);
-	pid_info = check_pid(pid);
+	pid_info = find_info_by_pid(pid);
 	if (pid_info)
 	{
 		printk("Del pid from tracer %d \n", pid);
@@ -90,7 +96,7 @@ static int delete_from_trace_list(int pid)
 		num_of_pid--;
 		spin_unlock(&pid_map_lock);
 		synchronize_rcu();
-		vfree(pid_info);
+		kfree(pid_info);
 		return 0;
 	} else {
 		printk("Not found Del pid from tracer %d \n", pid);
@@ -103,7 +109,7 @@ static int update_trace_list(int pid)
 {
 	struct info *pid_info;
 	rcu_read_lock();
-	pid_info = check_pid(pid);
+	pid_info = find_info_by_pid(pid);
 	if (pid_info)
 	{
 		pid_info->kmalloc_count++;
@@ -142,53 +148,61 @@ static int close_file(struct inode *device_file, struct file *instance) {
 
 static ssize_t read_file(struct file *File, char *user_buffer, size_t count, loff_t *offset) {
 	int remaining;
-	int size;
+	size_t size;
+	size_t to_copy;
 	char *buffer;
-	int num_of_order;
+	char *ptr;
 	struct info *pid_info; 
 	int bkt;
-	void *ptr;
+
+	size = (size_t)RESULT_LINE_LENGTH * READ_ONCE(num_of_pid);
+
+	if (*offset >= size)
+		return 0;
+
+	to_copy = min(size - (size_t)*offset, count);
+
+	ptr = kmalloc(size, GFP_KERNEL);
+	if (!ptr)
+		return -ENOMEM;
+
+	buffer = ptr;
 
 	rcu_read_lock();
-	size = RESULT_LINE_LENGTH * num_of_pid;
-	num_of_order = count > size ? size : count;
-	if (num_of_order == *offset)
-	{
-		rcu_read_unlock();
-		return 0;
-	}
-	
-	buffer = vmalloc(size);
-	ptr = buffer;
-	if (!buffer)
-	{
-		rcu_read_unlock();
-		return 0;
-	}
-	hash_for_each(pid_map, bkt, pid_info, node) {
-		snprintf(buffer, RESULT_LINE_LENGTH, RESULT_TEMPLATE, pid_info->pid, pid_info->kmalloc_count);
+	hash_for_each_rcu(pid_map, bkt, pid_info, node) {
+		snprintf(buffer, RESULT_LINE_LENGTH, RESULT_TEMPLATE,
+			 pid_info->pid, pid_info->kmalloc_count);
 		buffer += RESULT_LINE_LENGTH;
-    }
-	remaining = copy_to_user(user_buffer, ptr + *offset, num_of_order);
+	}
 	rcu_read_unlock();
-	vfree(ptr);
-	
-	*offset += (num_of_order - remaining);
-	return num_of_order - remaining;
+
+	remaining = copy_to_user(user_buffer, ptr + *offset, to_copy);
+	kfree(ptr);
+
+	if (remaining == (int)to_copy)
+		return -EFAULT;
+
+	*offset += (to_copy - remaining);
+	return to_copy - remaining;
 }
 
 static ssize_t write_file(struct file *File, const char *user_buffer, size_t count, loff_t *offs) {
-	int not_copied, delta, pid;
+	int not_copied, delta, pid, ret;
 	char buffer[MAX_COMMAND_LEN + 1];
 
 	if (count > MAX_COMMAND_LEN || count < 2)
 		return -EINVAL;
-	
+
 	not_copied = copy_from_user(buffer, user_buffer, count);
 	delta = count - not_copied;
 
-	buffer[count - 1] = 0;
-	pid = simple_strtol(buffer + 1, NULL, 10);
+	buffer[count] = 0;
+	if (count > 0 && buffer[count - 1] == '\n')
+		buffer[count - 1] = 0;
+
+	ret = kstrtoint(buffer + 1, 10, &pid);
+	if (ret < 0)
+		return -EINVAL;
 
 	switch (buffer[0])
 	{
@@ -229,9 +243,14 @@ static int init_file(void)
 	if( alloc_chrdev_region(&device_nr, 0, 1, DRIVER_NAME) < 0)
 		return -1;
 
-	printk("[Device] Major: %d, Minor: %d was registered!\n", device_nr >> 20, device_nr && 0xfffff);
+	/* Bug fixed earlier: use MAJOR/MINOR macros instead of logical && */
+	printk("[Device] Major: %d, Minor: %d was registered!\n", MAJOR(device_nr), MINOR(device_nr));
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 	if((device_class = class_create(DRIVER_CLASS)) == NULL)
+#else
+	if((device_class = class_create(THIS_MODULE, DRIVER_CLASS)) == NULL)
+#endif
 		goto ClassError;
 
 	if(device_create(device_class, NULL, device_nr, NULL, DRIVER_NAME) == NULL)
@@ -252,53 +271,64 @@ ClassError:
 	return -1;
 }
 
+/* Helper to free all entries in pid_map */
+static void cleanup_pid_map(void)
+{
+	struct info *pid_info;
+	struct hlist_node *tmp;
+	int bkt;
+
+	spin_lock(&pid_map_lock);
+	hash_for_each_safe(pid_map, bkt, tmp, pid_info, node) {
+		hash_del(&pid_info->node);
+		kfree(pid_info);
+	}
+	num_of_pid = 0;
+	spin_unlock(&pid_map_lock);
+}
+
 static int __init kprobe_init(void)
 {
 	int ret;
 	int key = 1;
 	struct info *pid_info;
-	num_of_pid = 1;
+
+	num_of_pid = 0;
 	hash_init(pid_map);
-	pid_info = vmalloc(sizeof(struct info));
+	pid_info = kmalloc(sizeof(struct info), GFP_KERNEL);
 	if (pid_info)
 	{
 		INIT_HLIST_NODE(&pid_info->node);
 		hash_add(pid_map, &pid_info->node, key);
 		pid_info->pid = key;
 		pid_info->kmalloc_count = 0;
-
-	}else{
-		printk("Cannot vmalloc memory \n");
+		num_of_pid++;
+	} else {
+		printk("Cannot kmalloc memory \n");
 	}
 
 	ret = init_kprobe_module();
 	if (ret < 0) {
+		cleanup_pid_map();
 		return ret;
 	}
 	ret = init_file();
-	if (ret < 0)
-	{
+	if (ret < 0) {
 		pr_err("Could not init file");
 		unregister_kprobe(&kmalloc_kp);
+		cleanup_pid_map();
 	}
 	return ret;
 }
 
 static void __exit kprobe_exit(void)
 {
-	struct info *pid_info; 
-	int bkt;
-	spin_lock(&pid_map_lock);
-	hash_for_each(pid_map, bkt, pid_info, node) {
-        hash_del(&pid_info->node);
-        vfree(pid_info);
-    }
-	spin_unlock(&pid_map_lock);
 	unregister_kprobe(&kmalloc_kp);
 	cdev_del(&device);
 	device_destroy(device_class, device_nr);
 	class_destroy(device_class);
 	unregister_chrdev_region(device_nr, 1);
+	cleanup_pid_map();
 }
 
 module_init(kprobe_init)
