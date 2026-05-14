@@ -1,14 +1,14 @@
 # Kprobe Module - Usage Guide and Technical Details
 
-This module is designed to monitor the number of `kmalloc()` calls (dynamic memory allocation in the Linux kernel) for specific Process IDs (PIDs).
+This module uses **Kprobes** to **hook** into kernel functions and **monitor** the number of `kmalloc()` calls per Process ID (PID).
 
 ---
 
 ## 1. Core Logic and How it Works
 
-### What is kmalloc?
+. **What is kmalloc?**
 
-`kmalloc` is the memory allocation function in the Linux kernel, similar to `malloc()` in a user-space C program.
+kmalloc is the memory allocation function in the Linux kernel, similar to malloc() in a user-space C program.
 
 **Example in user-space:**
 ```c
@@ -29,20 +29,17 @@ ptr = kmalloc(size, GFP_KERNEL);
 | **Memory Region** | User-space memory | Kernel-space memory |
 | **Deallocation** | `free()` | `kfree()` |
 
-`kmalloc()` is typically used for small to medium-sized memory allocations within the kernel. The returned memory is contiguous in the kernel's virtual address space and usually physically contiguous as well, making it ideal for drivers and kernel modules.
+kmalloc() is typically used for small to medium-sized memory allocations within the kernel. The returned memory is contiguous in the kernel's virtual address space and usually physically contiguous as well, making it ideal for drivers and kernel modules.
 
-### What does the program monitor?
-The module specifically monitors calls to the `__kmalloc` symbol. This is the core implementation function behind the various `kmalloc` wrappers.
+. **What does the program monitor?**
+The module monitors calls to the `__kmalloc` symbol, which is the core implementation behind various `kmalloc` variants.
 
-### How it works
-1.  **Kprobes Hooking**: The module uses the Linux **Kprobes** (Kernel Probes) mechanism to "break" into the `__kmalloc` function address whenever it is called.
-2.  **Handler Execution**: When `__kmalloc` is triggered, a `handler_pre` function inside the module runs first.
-3.  **PID Analysis**: Inside the handler, the module retrieves the current process's PID using `current->pid`.
-4.  **Storage & Statistics**:
-    *   The module maintains a **Hashtable** (`pid_map`) containing the PIDs to be tracked.
-    *   If the current PID is found in the tracking list, its `kmalloc_count` is incremented.
-    *   **RCU (Read-Copy-Update)** and **Spinlocks** are used to ensure data consistency when multiple CPUs access or modify the hashtable simultaneously.
-5.  **Interaction Interface**: The module creates a character device at `/dev/tracerdriver` for user-space communication.
+. **How it works**
+1.  **Kprobes Hooking**: Uses Linux Kprobes to hook into the `__kmalloc` function.
+2.  **Handler Execution**: A `handler_pre` function runs whenever `__kmalloc` is called.
+3.  **PID Analysis**: Retrieves the current PID using `current->pid`.
+4.  **Storage**: Tracks counts in a **Hashtable** (`pid_map`) using **RCU** and **Spinlocks** for thread safety.
+5.  **Interface**: Provides a character device at `/dev/tracerdriver` for interaction.
 
 ---
 
@@ -51,20 +48,16 @@ The module specifically monitors calls to the `__kmalloc` symbol. This is the co
 ### Standard Workflow (Using VM)
 
 **Step 1: Start the VM**
-Download the image, create the virtual disk, and start the Ubuntu VM:
 ```bash
 make start
 ```
-*Note: Wait about 60 seconds for SSH initialization.*
 
 **Step 2: Connect via SSH**
 ```bash
 make ssh
 ```
-*Default password is `ubuntu` if no SSH key is found.*
 
 **Step 3: Build and Install (Inside VM)**
-The source code is shared at `/hostshare`:
 ```bash
 cd /hostshare
 sudo make all
@@ -72,41 +65,23 @@ sudo insmod kprobemodule.ko
 sudo chmod 777 /dev/tracerdriver
 ```
 
-### Interacting with the Monitor
+### Interaction
 
--   **View current statistics**:
-    ```bash
-    cat /dev/tracerdriver
-    ```
--   **Start tracking a PID**:
-    ```bash
-    echo s{PID} > /dev/tracerdriver
-    # Example: echo s1234 > /dev/tracerdriver
-    ```
--   **Stop tracking a PID**:
-    ```bash
-    echo e{PID} > /dev/tracerdriver
-    ```
+- **View stats**: `cat /dev/tracerdriver`
+- **Start tracking**: `echo s{PID} > /dev/tracerdriver`
+- **Stop tracking**: `echo e{PID} > /dev/tracerdriver`
 
 ---
 
 ## 3. VM Management
 
--   **Check Status**: `make status`
--   **Stop VM**: `make stop`
--   **Reset VM (Wipe and recreate)**: `make reset`
--   **Clear All (Remove disks, seeds, etc.)**: `make clear`
+- `make status` - Check VM status.
+- `make stop` - Stop the VM.
+- `make reset` - Wipe and recreate VM.
+- `make clear` - Remove all VM-related files.
 
 ---
 
-## 4. Advanced Configuration
-
-Variables can be overridden in the `Makefile` or via CLI:
--   `SSH_PORT`: Default `2222`.
--   `DISK_SIZE`: Default `5G`.
--   `MEM`: Default `2048` (MB).
--   `CPUS`: Default `2`.
-
-## Technical Notes
--   **Compatibility**: Supports both old and new kernel versions (pre and post 6.4) by automatically detecting `class_create` signatures.
--   **9p Sharing**: The project directory is auto-mounted to `/hostshare`. If missing, wait for cloud-init to finish background tasks.
+## 4. Technical Notes
+- **Compatibility**: Supports kernel versions pre/post 6.4.
+- **Sharing**: Host directory is mounted at `/hostshare` via 9p.
