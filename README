@@ -1,19 +1,112 @@
-Monitor how many time the function kmalloc() is call in process context
+# Kprobe Module - Usage Guide and Technical Details
 
-1. Compile
-    make 
+This module is designed to monitor the number of `kmalloc()` calls (dynamic memory allocation in the Linux kernel) for specific Process IDs (PIDs).
 
-2. Install
-    sudo insmod kprobemodule.ko
+---
 
-3. Grant permission to the device file
-    sudo chmod 777 /dev/tracerdriver
+## 1. Core Logic and How it Works
 
-4. View info 
+### What is kmalloc?
+
+`kmalloc` is the memory allocation function in the Linux kernel, similar to `malloc()` in a user-space C program.
+
+**Example in user-space:**
+```c
+ptr = malloc(size);
+```
+
+**Example in kernel-space:**
+```c
+ptr = kmalloc(size, GFP_KERNEL);
+```
+
+**Key Differences:**
+
+| Feature | User-space | Kernel-space |
+| :--- | :--- | :--- |
+| **Function** | `malloc()` | `kmalloc()` |
+| **Context** | Standard process | Kernel |
+| **Memory Region** | User-space memory | Kernel-space memory |
+| **Deallocation** | `free()` | `kfree()` |
+
+`kmalloc()` is typically used for small to medium-sized memory allocations within the kernel. The returned memory is contiguous in the kernel's virtual address space and usually physically contiguous as well, making it ideal for drivers and kernel modules.
+
+### What does the program monitor?
+The module specifically monitors calls to the `__kmalloc` symbol. This is the core implementation function behind the various `kmalloc` wrappers.
+
+### How it works
+1.  **Kprobes Hooking**: The module uses the Linux **Kprobes** (Kernel Probes) mechanism to "break" into the `__kmalloc` function address whenever it is called.
+2.  **Handler Execution**: When `__kmalloc` is triggered, a `handler_pre` function inside the module runs first.
+3.  **PID Analysis**: Inside the handler, the module retrieves the current process's PID using `current->pid`.
+4.  **Storage & Statistics**:
+    *   The module maintains a **Hashtable** (`pid_map`) containing the PIDs to be tracked.
+    *   If the current PID is found in the tracking list, its `kmalloc_count` is incremented.
+    *   **RCU (Read-Copy-Update)** and **Spinlocks** are used to ensure data consistency when multiple CPUs access or modify the hashtable simultaneously.
+5.  **Interaction Interface**: The module creates a character device at `/dev/tracerdriver` for user-space communication.
+
+---
+
+## 2. Usage Guide
+
+### Standard Workflow (Using VM)
+
+**Step 1: Start the VM**
+Download the image, create the virtual disk, and start the Ubuntu VM:
+```bash
+make start
+```
+*Note: Wait about 60 seconds for SSH initialization.*
+
+**Step 2: Connect via SSH**
+```bash
+make ssh
+```
+*Default password is `ubuntu` if no SSH key is found.*
+
+**Step 3: Build and Install (Inside VM)**
+The source code is shared at `/hostshare`:
+```bash
+cd /hostshare
+sudo make all
+sudo insmod kprobemodule.ko
+sudo chmod 777 /dev/tracerdriver
+```
+
+### Interacting with the Monitor
+
+-   **View current statistics**:
+    ```bash
     cat /dev/tracerdriver
-
-5. Start monitor a process:
+    ```
+-   **Start tracking a PID**:
+    ```bash
     echo s{PID} > /dev/tracerdriver
+    # Example: echo s1234 > /dev/tracerdriver
+    ```
+-   **Stop tracking a PID**:
+    ```bash
+    echo e{PID} > /dev/tracerdriver
+    ```
 
-6. Clear monitor a process:
-    cho e{PID} > /dev/tracerdriver
+---
+
+## 3. VM Management
+
+-   **Check Status**: `make status`
+-   **Stop VM**: `make stop`
+-   **Reset VM (Wipe and recreate)**: `make reset`
+-   **Clear All (Remove disks, seeds, etc.)**: `make clear`
+
+---
+
+## 4. Advanced Configuration
+
+Variables can be overridden in the `Makefile` or via CLI:
+-   `SSH_PORT`: Default `2222`.
+-   `DISK_SIZE`: Default `5G`.
+-   `MEM`: Default `2048` (MB).
+-   `CPUS`: Default `2`.
+
+## Technical Notes
+-   **Compatibility**: Supports both old and new kernel versions (pre and post 6.4) by automatically detecting `class_create` signatures.
+-   **9p Sharing**: The project directory is auto-mounted to `/hostshare`. If missing, wait for cloud-init to finish background tasks.
