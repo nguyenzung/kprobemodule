@@ -8,9 +8,6 @@
  * You will see the trace data in /dev/tracerdriver
  *
  * --- Change log ---
- * Fix 1: Added per-CPU re-entrancy guard in kprobe handler to prevent
- *         infinite recursion when code paths triggered by the handler
- *         itself call kmalloc (e.g. read_file, printk internals).
  *
  * Fix 2 & 3: Replaced hand-rolled read_file (with manual buffer-size
  *         arithmetic and TOCTOU race on num_of_pid) with seq_file /
