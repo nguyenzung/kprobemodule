@@ -68,19 +68,6 @@ static dev_t device_nr;
 static struct class *device_class;
 static struct cdev device;
 
-/*
- * Fix 1 – per-CPU re-entrancy guard.
- *
- * The kprobe is placed on __kmalloc.  Any kmalloc call made from *within*
- * the handler (directly or indirectly – e.g. from seq_read, printk, RCU
- * internals …) on the same CPU would re-fire the same handler, causing
- * unbounded recursion and a kernel stack overflow.
- *
- * By setting this flag at handler entry and checking it first, we skip
- * the body on any re-entrant invocation on the same CPU.
- */
-static DEFINE_PER_CPU(bool, kprobe_in_handler);
-
 /* Fix 4 – use atomic_t so concurrent increments are safe under RCU. */
 struct info {
 	int pid;
@@ -181,13 +168,7 @@ static struct kprobe kmalloc_kp = {
 
 static int __kprobes handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
-	/* Fix 1 – bail out if we are already inside this handler on this CPU */
-	if (__this_cpu_read(kprobe_in_handler))
-		return 0;
-
-	__this_cpu_write(kprobe_in_handler, true);
 	update_trace_list(current->pid);
-	__this_cpu_write(kprobe_in_handler, false);
 	return 0;
 }
 
